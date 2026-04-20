@@ -285,7 +285,11 @@ function Portal() {
     { t: 'Sun 19:04', type:'discharge', kwh: 9.8,  rev: 1.73, price: 198, note:'demand response event' },
   ];
 
-  const last14 = Array.from({length:14}, (_,i)=>({ d:i+1, earn: 1.2 + Math.sin(i/2)*0.6 + Math.random()*0.4 }));
+  // deterministic, pseudo-random but stable across renders
+  const last14 = useMemo(() => Array.from({length:14}, (_,i)=>({
+    d: i+1,
+    earn: 1.2 + Math.sin(i/2)*0.6 + Math.sin(i*7.3)*0.25 + (i%3===0?0.3:0)
+  })), []);
 
   return html`
     <div class="fade-in grid grid-cols-12 gap-5">
