@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>VoltShare — Prototype</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          bg:      '#0b0f17',
+          panel:   '#121826',
+          panel2:  '#1a2235',
+          border:  '#222c42',
+          accent:  '#34d399',
+          accent2: '#60a5fa',
+          warn:    '#f59e0b',
+          danger:  '#ef4444',
+          muted:   '#8a97b2',
+        },
+        fontFamily: { sans: ['ui-sans-serif','system-ui','-apple-system','Segoe UI','Roboto','Helvetica','Arial'] }
+      }
+    }
+  }
+</script>
+<style>
+  html,body { background:#0b0f17; color:#e5ecf7; }
+  .card { background:#121826; border:1px solid #222c42; border-radius:14px; }
+  .card-inset { background:#0f1524; border:1px solid #1e2740; border-radius:10px; }
+  .stat-num { font-variant-numeric: tabular-nums; }
+  .slider { -webkit-appearance:none; appearance:none; width:100%; height:4px; background:#222c42; border-radius:999px; outline:none; }
+  .slider::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:16px; height:16px; border-radius:50%; background:#34d399; cursor:pointer; border:2px solid #0b0f17; }
+  .slider::-moz-range-thumb { width:16px; height:16px; border-radius:50%; background:#34d399; cursor:pointer; border:2px solid #0b0f17; }
+  .pill { font-size:10px; letter-spacing:.08em; text-transform:uppercase; padding:2px 8px; border-radius:999px; }
+  .divider { height:1px; background:#222c42; }
+  .fade-in { animation: fade .25s ease-out; }
+  @keyframes fade { from { opacity:0; transform: translateY(4px) } to { opacity:1; transform:none } }
+  .pulse-dot { width:8px; height:8px; border-radius:50%; background:#34d399; box-shadow:0 0 0 0 rgba(52,211,153,.6); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(52,211,153,.6)} 70%{box-shadow:0 0 0 10px rgba(52,211,153,0)} 100%{box-shadow:0 0 0 0 rgba(52,211,153,0)} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "recharts": "https://esm.sh/recharts@2.12.7?deps=react@18.3.1",
+    "htm": "https://esm.sh/htm@3.1.1"
+  }
+}
+</script>
+
+<script type="module">
+import React, { useState, useMemo, useEffect } from 'react';
+import { createRoot } from 'react-dom/client';
+import { LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid } from 'recharts';
+import htm from 'htm';
+const html = htm.bind(React.createElement);
+
+/* ---------- shared fake-but-consistent model ---------- */
+
+const fmtUSD = (n, d=0) => '$' + (n ?? 0).toLocaleString('en-US', { maximumFractionDigits:d, minimumFractionDigits:d });
+const fmtNum = (n, d=0) => (n ?? 0).toLocaleString('en-US', { maximumFractionDigits:d, minimumFractionDigits:d });
+const fmtPct = (n, d=1) => (n ?? 0).toFixed(d) + '%';
+
+// Hourly ERCOT-like price curve ($/MWh). Nightly trough, morning climb, late-afternoon peak.
+const hourlyPrice = (h) => {
+  const base = 45;
+  const shape = -18*Math.cos((h-4)*Math.PI/12) + 22*Math.exp(-Math.pow((h-18)/2.2, 2));
+  const noise = Math.sin(h*1.7)*3;
+  return Math.max(10, base + shape + noise);
+};
+const dayPrices = Array.from({length:24}, (_,h)=>({ h, price: hourlyPrice(h) }));
+
+// Economics model
+function computeEconomics(p) {
+  const { batteryKwh, capexPerKwh, cyclesPerDay, daysPerYear, spread, rte, omPerKwhPerYear, gridServicesPerKwhYr, numShares, years, pricePerShare } = p;
+  const capex = batteryKwh * capexPerKwh;
+  const throughputKwhYr = batteryKwh * cyclesPerDay * daysPerYear * rte;
+  const arbitrageRev   = throughputKwhYr * spread;
+  const gridRev        = batteryKwh * gridServicesPerKwhYr;
+  const omCost         = batteryKwh * omPerKwhPerYear;
+  const netAnnual      = arbitrageRev + gridRev - omCost;
+  const paybackYrs     = capex / Math.max(netAnnual, 1);
+  const investorCapex  = numShares * pricePerShare;
+  const perShareYr     = netAnnual / numShares;
+  const yieldPct       = (perShareYr / pricePerShare) * 100;
+  // 10y cashflow w/ 2%/yr degradation
+  const cashflow = [];
+  let cum = -capex;
+  for (let y=1; y<=years; y++) {
+    const degrade = Math.pow(0.98, y-1);
+    const yrNet = netAnnual * degrade;
+    cum += yrNet;
+    cashflow.push({ year: y, net: yrNet, cumulative: cum });
+  }
+  // crude IRR from cashflow sign change
+  const terminal = capex * 0.3; // salvage ~30%
+  const irr = estimateIRR([-capex, ...cashflow.map(c=>c.net).slice(0,-1), cashflow[cashflow.length-1].net + terminal]);
+  return { capex, throughputKwhYr, arbitrageRev, gridRev, omCost, netAnnual, paybackYrs, investorCapex, perShareYr, yieldPct, cashflow, irr };
+}
+function estimateIRR(cfs) {
+  let lo=-0.5, hi=1.0;
+  const npv = r => cfs.reduce((s,c,i)=> s + c/Math.pow(1+r,i), 0);
+  for (let i=0;i<60;i++) { const m=(lo+hi)/2; if (npv(m)>0) lo=m; else hi=m; }
+  return (lo+hi)/2;
+}
+
+/* ---------- UI atoms ---------- */
+
+const Stat = ({ label, value, sub, tone='default' }) => html`
+  <div class="card-inset p-4">
+    <div class="text-muted text-xs uppercase tracking-wider">${label}</div>
+    <div class="mt-1 stat-num text-2xl font-semibold ${tone==='accent'?'text-accent':tone==='warn'?'text-warn':'text-white'}">${value}</div>
+    ${sub && html`<div class="text-muted text-xs mt-1">${sub}</div>`}
+  </div>`;
+
+const Slider = ({ label, value, setValue, min, max, step, suffix, fmt }) => html`
+  <div>
+    <div class="flex items-baseline justify-between mb-1.5">
+      <label class="text-sm text-muted">${label}</label>
+      <span class="stat-num text-sm font-medium">${fmt ? fmt(value) : value}${suffix||''}</span>
+    </div>
+    <input type="range" class="slider" min=${min} max=${max} step=${step} value=${value}
+           onChange=${e=>setValue(parseFloat(e.target.value))} />
+  </div>`;
+
+const Tab = ({ active, onClick, children }) => html`
+  <button onClick=${onClick}
+    class="px-4 py-2 rounded-lg text-sm font-medium transition
+           ${active ? 'bg-panel2 text-white' : 'text-muted hover:text-white'}">
+    ${children}
+  </button>`;
+
+const Tip = ({ active, payload }) => {
+  if (!active || !payload?.length) return null;
+  return html`<div class="card-inset px-3 py-2 text-xs">
+    ${payload.map(p => html`<div key=${p.dataKey}><span class="text-muted">${p.name}:</span> <span class="stat-num">${typeof p.value==='number' ? p.value.toLocaleString(undefined,{maximumFractionDigits:2}) : p.value}</span></div>`)}
+  </div>`;
+};
+
+/* ---------- Dashboard (A) ---------- */
+
+function Dashboard() {
+  const [batteryKwh, setBatteryKwh] = useState(1000);
+  const [capexPerKwh, setCapexPerKwh] = useState(400);
+  const [spread, setSpread] = useState(0.14);
+  const [cyclesPerDay, setCyclesPerDay] = useState(1.2);
+  const [numShares, setNumShares] = useState(400);
+  const [pricePerShare, setPricePerShare] = useState(1000);
+
+  const econ = useMemo(() => computeEconomics({
+    batteryKwh, capexPerKwh, cyclesPerDay,
+    daysPerYear: 340, spread, rte: 0.88,
+    omPerKwhPerYear: 12, gridServicesPerKwhYr: 18,
+    numShares, years: 10, pricePerShare
+  }), [batteryKwh, capexPerKwh, spread, cyclesPerDay, numShares, pricePerShare]);
+
+  const chargeHours  = [1,2,3,4];
+  const dischargeHrs = [17,18,19,20];
+
+  return html`
+    <div class="fade-in grid grid-cols-12 gap-5">
+
+      <!-- LEFT: inputs -->
+      <div class="col-span-12 lg:col-span-4 card p-5 space-y-5">
+        <div>
+          <div class="text-xs uppercase tracking-widest text-muted">Pilot configuration</div>
+          <div class="text-lg font-semibold mt-1">Austin, TX (ERCOT)</div>
+          <div class="text-xs text-muted">80-household pilot · single battery asset</div>
+        </div>
+        <div class="divider"></div>
+        <${Slider} label="Battery size" value=${batteryKwh} setValue=${setBatteryKwh} min=${200} max=${4000} step=${100} suffix=" kWh" fmt=${v=>fmtNum(v)} />
+        <${Slider} label="CAPEX per kWh" value=${capexPerKwh} setValue=${setCapexPerKwh} min=${250} max=${700} step=${10} fmt=${v=>fmtUSD(v)} />
+        <${Slider} label="Avg peak/off-peak spread" value=${spread} setValue=${setSpread} min=${0.04} max=${0.30} step=${0.01} fmt=${v=>fmtUSD(v,2)} suffix="/kWh" />
+        <${Slider} label="Cycles / day" value=${cyclesPerDay} setValue=${setCyclesPerDay} min=${0.5} max=${2} step=${0.1} fmt=${v=>v.toFixed(1)} />
+        <div class="divider"></div>
+        <${Slider} label="Number of shares" value=${numShares} setValue=${setNumShares} min=${50} max=${2000} step=${10} fmt=${v=>fmtNum(v)} />
+        <${Slider} label="Price per share" value=${pricePerShare} setValue=${setPricePerShare} min=${100} max=${5000} step=${50} fmt=${v=>fmtUSD(v)} />
+        <div class="text-xs text-muted">Shares × price = ${fmtUSD(numShares*pricePerShare)} · must ≥ CAPEX (${fmtUSD(econ.capex)}) to fund</div>
+      </div>
+
+      <!-- RIGHT: outputs -->
+      <div class="col-span-12 lg:col-span-8 space-y-5">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <${Stat} label="Battery CAPEX"   value=${fmtUSD(econ.capex)} sub="upfront cost" />
+          <${Stat} label="Net annual revenue" value=${fmtUSD(econ.netAnnual)} sub="arbitrage + grid services − O&M" tone="accent" />
+          <${Stat} label="Payback"         value=${econ.paybackYrs.toFixed(1)+' yrs'} tone=${econ.paybackYrs<8?'accent':'warn'} />
+          <${Stat} label="10-yr IRR"       value=${fmtPct(econ.irr*100)} tone=${econ.irr>0.08?'accent':'warn'} sub="incl. 30% salvage" />
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <${Stat} label="Per-share annual earnings" value=${fmtUSD(econ.perShareYr, 0)} />
+          <${Stat} label="Per-share yield" value=${fmtPct(econ.yieldPct)} tone="accent" />
+          <${Stat} label="Energy dispatched / yr" value=${fmtNum(econ.throughputKwhYr/1000,1)+' MWh'} />
+        </div>
+
+        <!-- price curve -->
+        <div class="card p-5">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <div class="text-sm font-semibold">ERCOT wholesale price — typical summer day</div>
+              <div class="text-xs text-muted">Charge in off-peak (green), discharge in peak (red). Spread drives arbitrage.</div>
+            </div>
+            <div class="flex gap-3 text-xs">
+              <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-accent"></span>charge</span>
+              <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-danger"></span>discharge</span>
+            </div>
+          </div>
+          <div style=${{height:220}}>
+            <${ResponsiveContainer}>
+              <${AreaChart} data=${dayPrices.map(d=>({ ...d, charge: chargeHours.includes(d.h)?d.price:null, discharge: dischargeHrs.includes(d.h)?d.price:null }))}>
+                <defs>
+                  <linearGradient id="pg" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#60a5fa" stopOpacity="0.35"/>
+                    <stop offset="100%" stopColor="#60a5fa" stopOpacity="0"/>
+                  </linearGradient>
+                </defs>
+                <${CartesianGrid} stroke="#1e2740" vertical=${false} />
+                <${XAxis} dataKey="h" stroke="#8a97b2" fontSize="11" tickFormatter=${h=>h+':00'} />
+                <${YAxis} stroke="#8a97b2" fontSize="11" tickFormatter=${v=>'$'+v} />
+                <${Tooltip} content=${html`<${Tip}/>`} />
+                <${Area} type="monotone" dataKey="price" stroke="#60a5fa" fill="url(#pg)" strokeWidth="2" name="$/MWh" />
+                <${Line} type="monotone" dataKey="charge" stroke="#34d399" strokeWidth="3" dot=${{r:4, fill:'#34d399'}} name="charge" />
+                <${Line} type="monotone" dataKey="discharge" stroke="#ef4444" strokeWidth="3" dot=${{r:4, fill:'#ef4444'}} name="discharge" />
+              <//>
+            <//>
+          </div>
+        </div>
+
+        <!-- cashflow -->
+        <div class="card p-5">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-sm font-semibold">Cumulative cash flow (10 years)</div>
+            <div class="text-xs text-muted">breakeven when line crosses zero</div>
+          </div>
+          <div style=${{height:200}}>
+            <${ResponsiveContainer}>
+              <${LineChart} data=${econ.cashflow}>
+                <${CartesianGrid} stroke="#1e2740" vertical=${false} />
+                <${XAxis} dataKey="year" stroke="#8a97b2" fontSize="11" tickFormatter=${y=>'Yr '+y} />
+                <${YAxis} stroke="#8a97b2" fontSize="11" tickFormatter=${v=>'$'+(v/1000).toFixed(0)+'k'} />
+                <${Tooltip} content=${html`<${Tip}/>`} />
+                <${ReferenceLine} y=${0} stroke="#8a97b2" strokeDasharray="3 3" />
+                <${Line} type="monotone" dataKey="cumulative" stroke="#34d399" strokeWidth="2.5" dot=${false} name="cumulative" />
+              <//>
+            <//>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/* ---------- Portal (B) ---------- */
+
+function Portal() {
+  const ownedShares = 4;
+  const pricePerShare = 1000;
+  const invested = ownedShares * pricePerShare;
+  const lifetimeEarnings = 612.40;
+  const todayEarnings = 1.87;
+  const nextBillCredit = 42.15;
+  const batterySOC = 68;
+  const backupReserve = 20; // always held back
+  const status = 'Discharging';
+
+  const [now, setNow] = useState(new Date());
+  useEffect(() => { const t = setInterval(()=>setNow(new Date()), 1000); return ()=>clearInterval(t); }, []);
+
+  const activity = [
+    { t: '16:42', type:'discharge', kwh: 12.4, rev: 2.11, note:'peak pricing window' },
+    { t: '03:15', type:'charge',    kwh: 18.0, rev:-0.94, note:'off-peak recharge' },
+    { t: 'Yesterday', type:'dividend', kwh: null, rev: 4.08, note:'weekly distribution' },
+    { t: 'Mon', type:'discharge', kwh: 9.8,  rev: 1.73, note:'demand response event' },
+    { t: 'Sun', type:'grid',      kwh: null, rev: 0.62, note:'frequency regulation' },
+  ];
+
+  const last14 = Array.from({length:14}, (_,i)=>({ d:i+1, earn: 1.2 + Math.sin(i/2)*0.6 + Math.random()*0.4 }));
+
+  return html`
+    <div class="fade-in grid grid-cols-12 gap-5">
+
+      <!-- Top banner -->
+      <div class="col-span-12 card p-5 flex items-center justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-widest text-muted">Your VoltShare</div>
+          <div class="text-2xl font-semibold mt-1">Austin · Battery #A-17</div>
+          <div class="text-xs text-muted">${now.toLocaleTimeString()} · serving 80 neighbors</div>
+        </div>
+        <div class="flex items-center gap-3">
+          <div class="pulse-dot"></div>
+          <div>
+            <div class="text-xs text-muted">Status</div>
+            <div class="text-sm font-semibold text-accent">${status} — earning now</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- KPIs -->
+      <div class="col-span-12 grid grid-cols-2 md:grid-cols-4 gap-4">
+        <${Stat} label="Shares owned" value=${ownedShares} sub=${fmtUSD(invested)+' invested'} />
+        <${Stat} label="Lifetime earnings" value=${fmtUSD(lifetimeEarnings,2)} tone="accent" sub="since Jan 2026" />
+        <${Stat} label="Earning today" value=${fmtUSD(todayEarnings,2)} tone="accent" />
+        <${Stat} label="Next bill credit" value=${fmtUSD(nextBillCredit,2)} sub="applied Apr 28" />
+      </div>
+
+      <!-- Battery + Backup -->
+      <div class="col-span-12 lg:col-span-7 card p-5">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-sm font-semibold">Battery state</div>
+          <span class="pill bg-accent/20 text-accent">live</span>
+        </div>
+        <div class="flex items-end gap-6">
+          <div class="w-36 h-44 rounded-xl border-2 border-border relative overflow-hidden bg-panel2">
+            <div class="absolute bottom-0 left-0 right-0 transition-all" style=${{height: batterySOC+'%', background:'linear-gradient(180deg,#34d399,#22a27b)'}}></div>
+            <div class="absolute inset-0 flex flex-col items-center justify-center">
+              <div class="text-3xl font-bold stat-num">${batterySOC}%</div>
+              <div class="text-xs text-muted">state of charge</div>
+            </div>
+            <div class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1 w-10 h-2 bg-border rounded-t-sm"></div>
+          </div>
+          <div class="flex-1 space-y-4">
+            <div>
+              <div class="flex justify-between text-xs mb-1"><span class="text-muted">Capacity</span><span>1,000 kWh total</span></div>
+              <div class="w-full h-2 bg-panel2 rounded-full overflow-hidden">
+                <div class="h-full bg-accent2" style=${{width:(batterySOC)+'%'}}></div>
+              </div>
+            </div>
+            <div>
+              <div class="flex justify-between text-xs mb-1"><span class="text-muted">Your backup reserve</span><span class="text-warn">${backupReserve}% always held</span></div>
+              <div class="w-full h-2 bg-panel2 rounded-full overflow-hidden">
+                <div class="h-full bg-warn" style=${{width:backupReserve+'%'}}></div>
+              </div>
+              <div class="text-xs text-muted mt-1">Guaranteed ~6 hrs home backup during outages</div>
+            </div>
+            <div class="grid grid-cols-3 gap-3 pt-2">
+              <div class="card-inset p-3">
+                <div class="text-xs text-muted">Dispatching</div>
+                <div class="stat-num font-semibold text-danger">−68 kW</div>
+              </div>
+              <div class="card-inset p-3">
+                <div class="text-xs text-muted">Grid price now</div>
+                <div class="stat-num font-semibold">$214/MWh</div>
+              </div>
+              <div class="card-inset p-3">
+                <div class="text-xs text-muted">Temp</div>
+                <div class="stat-num font-semibold">78°F</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Earnings chart -->
+      <div class="col-span-12 lg:col-span-5 card p-5">
+        <div class="text-sm font-semibold mb-3">Daily earnings (last 14 days)</div>
+        <div style=${{height:200}}>
+          <${ResponsiveContainer}>
+            <${BarChart} data=${last14}>
+              <${CartesianGrid} stroke="#1e2740" vertical=${false} />
+              <${XAxis} dataKey="d" stroke="#8a97b2" fontSize="10" />
+              <${YAxis} stroke="#8a97b2" fontSize="10" tickFormatter=${v=>'$'+v.toFixed(1)} />
+              <${Tooltip} content=${html`<${Tip}/>`} />
+              <${Bar} dataKey="earn" fill="#34d399" radius=${[4,4,0,0]} name="$ earned" />
+            <//>
+          <//>
+        </div>
+        <div class="text-xs text-muted mt-2">Avg ${fmtUSD(last14.reduce((s,d)=>s+d.earn,0)/14,2)}/day · projected ${fmtUSD(last14.reduce((s,d)=>s+d.earn,0)/14*365,0)}/yr</div>
+      </div>
+
+      <!-- Marketplace -->
+      <div class="col-span-12 lg:col-span-7 card p-5">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <div class="text-sm font-semibold">Marketplace</div>
+            <div class="text-xs text-muted">Secondary market for VoltShare stakes · Battery #A-17</div>
+          </div>
+          <button class="pill bg-accent/20 text-accent">+ List a share</button>
+        </div>
+        <table class="w-full text-sm">
+          <thead class="text-xs text-muted">
+            <tr><th class="text-left py-2">Seller</th><th class="text-left">Shares</th><th class="text-left">Ask</th><th class="text-left">Implied yield</th><th></th></tr>
+          </thead>
+          <tbody>
+            ${[
+              { s:'Neighbor · 7m ago', sh:2, ask:1020, y:6.9 },
+              { s:'Neighbor · 1h',     sh:1, ask:995,  y:7.1 },
+              { s:'Estate sale',       sh:5, ask:980,  y:7.2 },
+              { s:'Moving out-of-state', sh:3, ask:1040, y:6.7 },
+            ].map(r => html`
+              <tr key=${r.s} class="border-t border-border">
+                <td class="py-2.5">${r.s}</td>
+                <td class="stat-num">${r.sh}</td>
+                <td class="stat-num">${fmtUSD(r.ask)}</td>
+                <td class="stat-num text-accent">${fmtPct(r.y)}</td>
+                <td class="text-right"><button class="pill bg-panel2 border border-border hover:border-accent">Buy</button></td>
+              </tr>`)}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Activity -->
+      <div class="col-span-12 lg:col-span-5 card p-5">
+        <div class="text-sm font-semibold mb-3">Recent activity</div>
+        <div class="space-y-3">
+          ${activity.map((a,i)=> html`
+            <div key=${i} class="flex items-center gap-3">
+              <div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold
+                ${a.type==='discharge'?'bg-danger/20 text-danger':
+                  a.type==='charge'?'bg-accent2/20 text-accent2':
+                  a.type==='dividend'?'bg-accent/20 text-accent':'bg-warn/20 text-warn'}">
+                ${a.type==='discharge'?'↑':a.type==='charge'?'↓':a.type==='dividend'?'$':'~'}
+              </div>
+              <div class="flex-1">
+                <div class="text-sm capitalize">${a.type} ${a.kwh?`· ${a.kwh} kWh`:''}</div>
+                <div class="text-xs text-muted">${a.note} · ${a.t}</div>
+              </div>
+              <div class="stat-num text-sm ${a.rev>=0?'text-accent':'text-muted'}">${(a.rev>=0?'+':'')+fmtUSD(a.rev,2)}</div>
+            </div>`)}
+        </div>
+      </div>
+
+    </div>`;
+}
+
+/* ---------- Shell ---------- */
+
+function App() {
+  const [tab, setTab] = useState('dashboard');
+  return html`
+    <div class="min-h-screen">
+      <header class="border-b border-border">
+        <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-accent to-accent2 flex items-center justify-center font-bold text-bg">V</div>
+            <div>
+              <div class="font-semibold tracking-tight">VoltShare</div>
+              <div class="text-xs text-muted -mt-0.5">Community-owned battery storage · prototype</div>
+            </div>
+          </div>
+          <nav class="flex gap-1 bg-panel rounded-lg p-1 border border-border">
+            <${Tab} active=${tab==='dashboard'} onClick=${()=>setTab('dashboard')}>Economics</${Tab}>
+            <${Tab} active=${tab==='portal'}    onClick=${()=>setTab('portal')}>Subscriber Portal</${Tab}>
+          </nav>
+          <div class="text-xs text-muted hidden md:block">Fake numbers · demo only</div>
+        </div>
+      </header>
+      <main class="max-w-7xl mx-auto px-6 py-6">
+        ${tab==='dashboard' ? html`<${Dashboard}/>` : html`<${Portal}/>`}
+      </main>
+      <footer class="max-w-7xl mx-auto px-6 py-8 text-xs text-muted">
+        VoltShare prototype · economics model + subscriber view · numbers are illustrative, not financial advice
+      </footer>
+    </div>`;
+}
+
+createRoot(document.getElementById('root')).render(html`<${App}/>`);
+</script>
+</body>
+</html>
