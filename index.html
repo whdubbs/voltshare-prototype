@@ -266,18 +266,23 @@ function Portal() {
   const todayEarnings = 1.87;
   const nextBillCredit = 42.15;
   const batterySOC = 68;
-  const backupReserve = 20; // always held back
+  const backupReservePct = 20; // always held back
+  const backupHoursNow = 14.2;     // at current SOC, for your home
+  const backupHoursGuaranteed = 6; // floor via reserve
   const status = 'Discharging';
 
   const [now, setNow] = useState(new Date());
   useEffect(() => { const t = setInterval(()=>setNow(new Date()), 1000); return ()=>clearInterval(t); }, []);
 
+  const weekEarnings = 14.86;
+
   const activity = [
-    { t: '16:42', type:'discharge', kwh: 12.4, rev: 2.11, note:'peak pricing window' },
-    { t: '03:15', type:'charge',    kwh: 18.0, rev:-0.94, note:'off-peak recharge' },
-    { t: 'Yesterday', type:'dividend', kwh: null, rev: 4.08, note:'weekly distribution' },
-    { t: 'Mon', type:'discharge', kwh: 9.8,  rev: 1.73, note:'demand response event' },
-    { t: 'Sun', type:'grid',      kwh: null, rev: 0.62, note:'frequency regulation' },
+    { t: '16:42', type:'discharge', kwh: 12.4, rev: 2.11, price: 214, note:'ERCOT peak · $214/MWh' },
+    { t: '14:08', type:'grid',      kwh: null, rev: 0.84, price: null, note:'frequency regulation (RRS)' },
+    { t: '03:15', type:'charge',    kwh: 18.0, rev:-0.94, price: 28,  note:'off-peak recharge · $28/MWh' },
+    { t: 'Yesterday', type:'dividend', kwh: null, rev: 4.08, price: null, note:'weekly distribution to shareholders' },
+    { t: 'Mon 18:22', type:'discharge', kwh: 21.6, rev: 6.14, price: 489, note:'scarcity event (ORDC) · $489/MWh' },
+    { t: 'Sun 19:04', type:'discharge', kwh: 9.8,  rev: 1.73, price: 198, note:'demand response event' },
   ];
 
   const last14 = Array.from({length:14}, (_,i)=>({ d:i+1, earn: 1.2 + Math.sin(i/2)*0.6 + Math.random()*0.4 }));
@@ -309,47 +314,51 @@ function Portal() {
         <${Stat} label="Next bill credit" value=${fmtUSD(nextBillCredit,2)} sub="applied Apr 28" />
       </div>
 
-      <!-- Battery + Backup -->
+      <!-- Backup readiness — hero (Base-inspired trust anchor) -->
       <div class="col-span-12 lg:col-span-7 card p-5">
-        <div class="flex items-center justify-between mb-3">
-          <div class="text-sm font-semibold">Battery state</div>
-          <span class="pill bg-accent/20 text-accent">live</span>
-        </div>
-        <div class="flex items-end gap-6">
-          <div class="w-36 h-44 rounded-xl border-2 border-border relative overflow-hidden bg-panel2">
-            <div class="absolute bottom-0 left-0 right-0 transition-all" style=${{height: batterySOC+'%', background:'linear-gradient(180deg,#34d399,#22a27b)'}}></div>
-            <div class="absolute inset-0 flex flex-col items-center justify-center">
-              <div class="text-3xl font-bold stat-num">${batterySOC}%</div>
-              <div class="text-xs text-muted">state of charge</div>
-            </div>
-            <div class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1 w-10 h-2 bg-border rounded-t-sm"></div>
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <div class="text-sm font-semibold">Backup readiness</div>
+            <div class="text-xs text-muted">If the grid goes down right now</div>
           </div>
-          <div class="flex-1 space-y-4">
-            <div>
-              <div class="flex justify-between text-xs mb-1"><span class="text-muted">Capacity</span><span>1,000 kWh total</span></div>
-              <div class="w-full h-2 bg-panel2 rounded-full overflow-hidden">
-                <div class="h-full bg-accent2" style=${{width:(batterySOC)+'%'}}></div>
+          <span class="pill bg-accent/20 text-accent">protected</span>
+        </div>
+        <div class="grid grid-cols-12 gap-5 items-center">
+          <!-- Hours hero -->
+          <div class="col-span-12 md:col-span-5 text-center md:text-left">
+            <div class="stat-num font-bold text-6xl leading-none text-accent">${backupHoursNow.toFixed(1)}<span class="text-2xl text-muted ml-1">hrs</span></div>
+            <div class="text-sm text-muted mt-2">of home power available during an outage</div>
+            <div class="text-xs text-muted mt-3">Minimum guaranteed: <span class="text-warn font-semibold">${backupHoursGuaranteed} hrs</span> (reserve never sold)</div>
+          </div>
+          <!-- Battery viz -->
+          <div class="col-span-12 md:col-span-7">
+            <div class="flex items-end gap-4">
+              <div class="w-24 h-36 rounded-xl border-2 border-border relative overflow-hidden bg-panel2 shrink-0">
+                <div class="absolute bottom-0 left-0 right-0 transition-all" style=${{height: batterySOC+'%', background:'linear-gradient(180deg,#34d399,#22a27b)'}}></div>
+                <!-- reserve floor line -->
+                <div class="absolute left-0 right-0 border-t border-dashed border-warn" style=${{bottom: backupReservePct+'%'}}>
+                  <div class="absolute -right-1 -top-2 text-[10px] text-warn font-semibold bg-panel px-1 rounded">reserve</div>
+                </div>
+                <div class="absolute inset-0 flex flex-col items-center justify-center">
+                  <div class="text-2xl font-bold stat-num">${batterySOC}%</div>
+                  <div class="text-[10px] text-muted">SoC</div>
+                </div>
+                <div class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1 w-8 h-1.5 bg-border rounded-t-sm"></div>
               </div>
-            </div>
-            <div>
-              <div class="flex justify-between text-xs mb-1"><span class="text-muted">Your backup reserve</span><span class="text-warn">${backupReserve}% always held</span></div>
-              <div class="w-full h-2 bg-panel2 rounded-full overflow-hidden">
-                <div class="h-full bg-warn" style=${{width:backupReserve+'%'}}></div>
-              </div>
-              <div class="text-xs text-muted mt-1">Guaranteed ~6 hrs home backup during outages</div>
-            </div>
-            <div class="grid grid-cols-3 gap-3 pt-2">
-              <div class="card-inset p-3">
-                <div class="text-xs text-muted">Dispatching</div>
-                <div class="stat-num font-semibold text-danger">−68 kW</div>
-              </div>
-              <div class="card-inset p-3">
-                <div class="text-xs text-muted">Grid price now</div>
-                <div class="stat-num font-semibold">$214/MWh</div>
-              </div>
-              <div class="card-inset p-3">
-                <div class="text-xs text-muted">Temp</div>
-                <div class="stat-num font-semibold">78°F</div>
+              <div class="flex-1 space-y-2">
+                <div class="card-inset p-2.5">
+                  <div class="text-[10px] text-muted uppercase tracking-wider">Dispatching</div>
+                  <div class="stat-num font-semibold text-danger text-lg">−68 kW</div>
+                </div>
+                <div class="card-inset p-2.5">
+                  <div class="text-[10px] text-muted uppercase tracking-wider">Grid price now</div>
+                  <div class="stat-num font-semibold text-lg">$214<span class="text-xs text-muted">/MWh</span></div>
+                  <div class="text-[10px] text-accent">earning ~$0.19/min</div>
+                </div>
+                <div class="card-inset p-2.5">
+                  <div class="text-[10px] text-muted uppercase tracking-wider">Switchover time</div>
+                  <div class="stat-num font-semibold text-lg">&lt;0.5s</div>
+                </div>
               </div>
             </div>
           </div>
@@ -404,25 +413,45 @@ function Portal() {
         </table>
       </div>
 
-      <!-- Activity -->
+      <!-- Dispatch log -->
       <div class="col-span-12 lg:col-span-5 card p-5">
-        <div class="text-sm font-semibold mb-3">Recent activity</div>
-        <div class="space-y-3">
+        <div class="flex items-center justify-between mb-1">
+          <div class="text-sm font-semibold">Dispatch log</div>
+          <span class="pill bg-panel2 text-muted">your share · 1%</span>
+        </div>
+        <div class="text-xs text-muted mb-3">Every dollar this battery earned — your pro-rata cut on the right.</div>
+        <div class="card-inset p-3 mb-3 flex items-center justify-between">
+          <div>
+            <div class="text-[11px] uppercase tracking-wider text-muted">This week</div>
+            <div class="stat-num text-2xl font-bold text-accent">${fmtUSD(weekEarnings,2)}</div>
+          </div>
+          <div class="text-right">
+            <div class="text-[11px] uppercase tracking-wider text-muted">Biggest event</div>
+            <div class="stat-num text-sm font-semibold">ORDC scarcity · Mon</div>
+            <div class="stat-num text-xs text-accent">+$6.14 · $489/MWh</div>
+          </div>
+        </div>
+        <div class="space-y-2.5 max-h-[260px] overflow-y-auto pr-1">
           ${activity.map((a,i)=> html`
-            <div key=${i} class="flex items-center gap-3">
-              <div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold
+            <div key=${i} class="flex items-center gap-3 card-inset p-2.5">
+              <div class="w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold shrink-0
                 ${a.type==='discharge'?'bg-danger/20 text-danger':
                   a.type==='charge'?'bg-accent2/20 text-accent2':
                   a.type==='dividend'?'bg-accent/20 text-accent':'bg-warn/20 text-warn'}">
                 ${a.type==='discharge'?'↑':a.type==='charge'?'↓':a.type==='dividend'?'$':'~'}
               </div>
-              <div class="flex-1">
-                <div class="text-sm capitalize">${a.type} ${a.kwh?`· ${a.kwh} kWh`:''}</div>
-                <div class="text-xs text-muted">${a.note} · ${a.t}</div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium capitalize">${a.type}${a.kwh?` · ${a.kwh} kWh`:''}</div>
+                <div class="text-xs text-muted truncate">${a.note}</div>
+                <div class="text-[10px] text-muted mt-0.5">${a.t}</div>
               </div>
-              <div class="stat-num text-sm ${a.rev>=0?'text-accent':'text-muted'}">${(a.rev>=0?'+':'')+fmtUSD(a.rev,2)}</div>
+              <div class="text-right shrink-0">
+                <div class="stat-num text-base font-semibold ${a.rev>=0?'text-accent':'text-muted'}">${(a.rev>=0?'+':'')+fmtUSD(a.rev,2)}</div>
+                ${a.price && html`<div class="text-[10px] text-muted">$${a.price}/MWh</div>`}
+              </div>
             </div>`)}
         </div>
+        <div class="text-[11px] text-muted mt-3 italic">Base Power hides this from their customers. You own the asset — you see every receipt.</div>
       </div>
 
     </div>`;
